@@ -13,13 +13,6 @@ It helps you monitor an external screen that you cannot physically see, such as:
 
 Instead of using extra hardware like an HDMI splitter, preview monitor, or capture device, LiveMonitorPreview gives you a simple software preview.
 
-## Usage
-
-1. Start LiveMonitorPreview.
-2. Choose the desktop screen to monitor.
-3. Keep the small preview window open on your main screen.
-4. Check the preview to confirm what is currently shown on the external display.
-
 ## Use Cases
 
 - Live events
