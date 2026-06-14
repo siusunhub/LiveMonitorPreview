@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Drawing;
@@ -6,6 +6,7 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -13,6 +14,8 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Screen = System.Windows.Forms.Screen;
+using MenuItem = System.Windows.Controls.MenuItem;
+using ContextMenu = System.Windows.Controls.ContextMenu;
 
 namespace LiveMonitorPreview
 {
@@ -53,12 +56,12 @@ namespace LiveMonitorPreview
 
     public partial class MainWindow : Window
     {
-	
         [DllImport("shcore.dll")]
         static extern int SetProcessDpiAwareness(PROCESS_DPI_AWARENESS value);
 
         [DllImport("user32.dll")]
         static extern bool SetProcessDPIAware();
+        
         [DllImport("user32.dll")]
         static extern bool GetCursorInfo(out CURSORINFO pci);
 
@@ -71,20 +74,26 @@ namespace LiveMonitorPreview
         [DllImport("gdi32.dll")]
         static extern bool DeleteObject(IntPtr hObject);
 
-        private ObservableCollection<MonitorViewModel> _monitors;
-        private DispatcherTimer _refreshTimer;
+        private readonly ObservableCollection<MonitorViewModel> _monitors = new();
+        private DispatcherTimer? _refreshTimer;
+        private System.Windows.Forms.NotifyIcon? _notifyIcon;
         private int _refreshInterval = 2000; // Default 2 seconds
         private bool _showMonitorNames = true;
         private bool _lowQualityMode = false;
         private bool _captureCursor = false;
-        private MonitorViewModel _draggedMonitor;
+        private MonitorViewModel? _draggedMonitor;
         private int _refreshCount = 0;
+        private bool _isRefreshing = false;
 
         public MainWindow()
         {
             InitializeComponent();
             InitializeMonitors();
             SetupRefreshTimer();
+            SetupNotifyIcon();
+
+            // Hook hotkeys
+            this.KeyDown += MainWindow_KeyDown;
 
             // Update card sizes when window is resized
             this.SizeChanged += (s, e) => UpdateCardSizes();
@@ -92,7 +101,7 @@ namespace LiveMonitorPreview
 
         private void InitializeMonitors()
         {
-            _monitors = new ObservableCollection<MonitorViewModel>();
+            _monitors.Clear();
             var screens = Screen.AllScreens;
 
             for (int i = 0; i < screens.Length; i++)
@@ -121,14 +130,17 @@ namespace LiveMonitorPreview
             // Subtract margins and padding (10px window margin + 5px per card margin * 2 sides * count + 20px buffer)
             double availableWidth = this.ActualWidth - 20 - (_monitors.Count * 10) - 20;
             double cardWidth = Math.Max(120, availableWidth / _monitors.Count);
-            
-            // Calculate card height to maintain roughly 16:9 aspect ratio for the image
-            double cardHeight = (cardWidth * 9 / 16) + 40; // +40 for text and padding
 
             foreach (var monitor in _monitors)
             {
                 monitor.CardWidth = cardWidth;
-                monitor.CardHeight = cardHeight;
+                
+                // Calculate height based on actual aspect ratio of the monitor
+                double aspect = monitor.Bounds.Width > 0 
+                    ? (double)monitor.Bounds.Height / monitor.Bounds.Width 
+                    : 9.0 / 16.0;
+                
+                monitor.CardHeight = (cardWidth * aspect) + 40; // +40 for text and padding
             }
         }
 
@@ -140,39 +152,145 @@ namespace LiveMonitorPreview
             _refreshTimer.Start();
         }
 
-        private void RefreshAllMonitors()
+        private void SetRefreshInterval(int milliseconds)
         {
-            var screens = Screen.AllScreens;
-            
-            // Check if monitor count has changed
-            if (screens.Length != _monitors.Count)
+            _refreshInterval = milliseconds;
+            if (_refreshTimer != null)
             {
-                RebuildMonitorList(screens);
-                UpdateCardSizes();
-                return;
+                _refreshTimer.Stop();
+                _refreshTimer.Interval = TimeSpan.FromMilliseconds(_refreshInterval);
+                _refreshTimer.Start();
             }
+        }
+
+        private void SetupNotifyIcon()
+        {
+            _notifyIcon = new System.Windows.Forms.NotifyIcon();
             
-            // Update each monitor by matching DeviceName (not by position)
-            foreach (var monitor in _monitors)
+            // Try to load app icon from base directory
+            try
             {
-                // Find the corresponding screen by device name
-                var screen = screens.FirstOrDefault(s => s.DeviceName == monitor.MonitorName);
-                
-                if (screen != null)
+                string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "computer_115306.ico");
+                if (File.Exists(iconPath))
                 {
-                    // Update resolution in case it changed
-                    monitor.Bounds = screen.Bounds;
-                    monitor.IsPrimary = screen.Primary;
-                    monitor.UpdateDisplayName();
-                    
-                    // Update preview only if not disabled
-                    if (!monitor.IsRefreshDisabled)
-                    {
-                        monitor.Preview = CaptureScreen(monitor.Bounds);
-                    }
+                    _notifyIcon.Icon = new Icon(iconPath);
+                }
+                else
+                {
+                    _notifyIcon.Icon = SystemIcons.Application;
                 }
             }
+            catch
+            {
+                _notifyIcon.Icon = SystemIcons.Application;
+            }
+
+            _notifyIcon.Text = "Monitor Preview";
+            _notifyIcon.Visible = true;
             
+            _notifyIcon.MouseClick += (s, e) =>
+            {
+                if (e.Button == System.Windows.Forms.MouseButtons.Left)
+                {
+                    this.Show();
+                    this.WindowState = WindowState.Normal;
+                    this.Activate();
+                }
+            };
+
+            // Hook close event to clean up tray icon
+            this.Closed += (s, e) =>
+            {
+                if (_notifyIcon != null)
+                {
+                    _notifyIcon.Visible = false;
+                    _notifyIcon.Dispose();
+                }
+            };
+        }
+
+        protected override void OnStateChanged(EventArgs e)
+        {
+            if (this.WindowState == WindowState.Minimized)
+            {
+                this.Hide(); // Hide from taskbar and show only in tray
+            }
+            base.OnStateChanged(e);
+        }
+
+        private void MainWindow_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            switch (e.Key)
+            {
+                case Key.Escape:
+                    this.WindowState = WindowState.Minimized;
+                    break;
+                case Key.T:
+                    if (Keyboard.Modifiers == ModifierKeys.Control)
+                    {
+                        this.Topmost = !this.Topmost;
+                    }
+                    break;
+                case Key.Q:
+                    if (Keyboard.Modifiers == ModifierKeys.Control)
+                    {
+                        System.Windows.Application.Current.Shutdown();
+                    }
+                    break;
+            }
+        }
+
+        private async void RefreshAllMonitors()
+        {
+            if (_isRefreshing) return;
+            _isRefreshing = true;
+
+            try
+            {
+                var screens = Screen.AllScreens;
+                
+                // Check if monitor count has changed
+                if (screens.Length != _monitors.Count)
+                {
+                    await RebuildMonitorListAsync(screens);
+                    UpdateCardSizes();
+                    return;
+                }
+                
+                // Capture all monitors concurrently on background threads
+                var tasks = _monitors.Select(async monitor =>
+                {
+                    var screen = screens.FirstOrDefault(s => s.DeviceName == monitor.MonitorName);
+                    if (screen != null)
+                    {
+                        monitor.Bounds = screen.Bounds;
+                        monitor.IsPrimary = screen.Primary;
+                        monitor.UpdateDisplayName();
+                        
+                        if (!monitor.IsRefreshDisabled)
+                        {
+                            var bounds = monitor.Bounds;
+                            var cardWidth = monitor.CardWidth;
+                            ImageSource? preview = await Task.Run(() => CaptureScreen(bounds, cardWidth));
+                            if (preview != null)
+                            {
+                                monitor.Preview = preview;
+                            }
+                        }
+                    }
+                }).ToList();
+
+                await Task.WhenAll(tasks);
+            }
+            catch
+            {
+                // Silently ignore refresh errors to prevent app crashes
+            }
+            finally
+            {
+                _isRefreshing = false;
+            }
+
             // Force garbage collection every 50 refreshes
             _refreshCount++;
             if (_refreshCount >= 50)
@@ -184,7 +302,7 @@ namespace LiveMonitorPreview
             }
         }
         
-        private void RebuildMonitorList(Screen[] screens)
+        private async Task RebuildMonitorListAsync(Screen[] screens)
         {
             _monitors.Clear();
             
@@ -198,96 +316,104 @@ namespace LiveMonitorPreview
                     IsPrimary = screens[i].Primary
                 };
                 monitor.UpdateDisplayName();
-                monitor.Preview = CaptureScreen(monitor.Bounds);
                 _monitors.Add(monitor);
             }
+
+            // Capture initial previews in the background
+            var tasks = _monitors.Select(async monitor =>
+            {
+                var bounds = monitor.Bounds;
+                var cardWidth = monitor.CardWidth;
+                var preview = await Task.Run(() => CaptureScreen(bounds, cardWidth));
+                if (preview != null)
+                {
+                    monitor.Preview = preview;
+                }
+            }).ToList();
+
+            await Task.WhenAll(tasks);
         }
 
-        private BitmapImage CaptureScreen(Rectangle bounds)
+        private BitmapSource? CaptureScreen(Rectangle bounds, double targetWidth)
         {
             try
             {
-                if (_lowQualityMode)
+                // Determine scale dimensions based on card size
+                int width = (int)targetWidth;
+                int height = (int)(targetWidth * bounds.Height / bounds.Width);
+
+                using (Bitmap fullBitmap = new Bitmap(bounds.Width, bounds.Height))
                 {
-                    // Low quality mode: reduced resolution and JPEG compression
-                    int width = bounds.Width / 2;
-                    int height = bounds.Height / 2;
-
-                    using (Bitmap fullBitmap = new Bitmap(bounds.Width, bounds.Height))
+                    using (Graphics gFull = Graphics.FromImage(fullBitmap))
                     {
-                        using (Graphics gFull = Graphics.FromImage(fullBitmap))
+                        gFull.CopyFromScreen(bounds.X, bounds.Y, 0, 0, bounds.Size);
+
+                        if (_captureCursor)
                         {
-                            gFull.CopyFromScreen(bounds.X, bounds.Y, 0, 0, bounds.Size);
-
-                            // Draw cursor if enabled
-                            if (_captureCursor)
-                            {
-                                DrawCursorOnBitmap(gFull, bounds);
-                            }
-                        }
-
-                        using (Bitmap scaledBitmap = new Bitmap(width, height))
-                        {
-                            using (Graphics g = Graphics.FromImage(scaledBitmap))
-                            {
-                                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
-                                g.DrawImage(fullBitmap, 0, 0, width, height);
-                            }
-
-                            using (MemoryStream memory = new MemoryStream())
-                            {
-                                scaledBitmap.Save(memory, ImageFormat.Jpeg);
-                                memory.Position = 0;
-
-                                BitmapImage bitmapImage = new BitmapImage();
-                                bitmapImage.BeginInit();
-                                bitmapImage.StreamSource = memory;
-                                bitmapImage.CacheOption = BitmapCacheOption.OnLoad;
-                                bitmapImage.DecodePixelWidth = 180;
-                                bitmapImage.EndInit();
-                                bitmapImage.Freeze();
-
-                                return bitmapImage;
-                            }
+                            DrawCursorOnBitmap(gFull, bounds);
                         }
                     }
-                }
-                else
-                {
-                    // High quality mode: full resolution PNG
-                    using (Bitmap bitmap = new Bitmap(bounds.Width, bounds.Height))
+
+                    using (Bitmap scaledBitmap = new Bitmap(width, height))
                     {
-                        using (Graphics g = Graphics.FromImage(bitmap))
+                        using (Graphics g = Graphics.FromImage(scaledBitmap))
                         {
-                            g.CopyFromScreen(bounds.X, bounds.Y, 0, 0, bounds.Size);
+                            g.InterpolationMode = _lowQualityMode 
+                                ? System.Drawing.Drawing2D.InterpolationMode.Low 
+                                : System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
 
-                            // Draw cursor if enabled
-                            if (_captureCursor)
-                            {
-                                DrawCursorOnBitmap(g, bounds);
-                            }
+                            g.DrawImage(fullBitmap, 0, 0, width, height);
                         }
 
-                        using (MemoryStream memory = new MemoryStream())
-                        {
-                            bitmap.Save(memory, ImageFormat.Png);
-                            memory.Position = 0;
-
-                            BitmapImage bitmapImage = new BitmapImage();
-                            bitmapImage.BeginInit();
-                            bitmapImage.StreamSource = memory;
-                            bitmapImage.CacheOption = BitmapCacheOption.OnLoad;
-                            bitmapImage.EndInit();
-                            bitmapImage.Freeze();
-
-                            return bitmapImage;
-                        }
+                        return ConvertToBitmapSource(scaledBitmap);
                     }
                 }
             }
             catch
             {
                 return null;
+            }
+        }
+
+        private static BitmapSource ConvertToBitmapSource(Bitmap bitmap)
+        {
+            var rect = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
+            var bitmapData = bitmap.LockBits(rect, ImageLockMode.ReadOnly, bitmap.PixelFormat);
+            try
+            {
+                int size = bitmapData.Stride * bitmapData.Height;
+                System.Windows.Media.PixelFormat pf;
+                switch (bitmap.PixelFormat)
+                {
+                    case System.Drawing.Imaging.PixelFormat.Format24bppRgb:
+                        pf = System.Windows.Media.PixelFormats.Bgr24;
+                        break;
+                    case System.Drawing.Imaging.PixelFormat.Format32bppRgb:
+                        pf = System.Windows.Media.PixelFormats.Bgr32;
+                        break;
+                    case System.Drawing.Imaging.PixelFormat.Format32bppArgb:
+                    default:
+                        pf = System.Windows.Media.PixelFormats.Bgra32;
+                        break;
+                }
+
+                BitmapSource bitmapSource = BitmapSource.Create(
+                    bitmap.Width,
+                    bitmap.Height,
+                    bitmap.HorizontalResolution,
+                    bitmap.VerticalResolution,
+                    pf,
+                    null,
+                    bitmapData.Scan0,
+                    size,
+                    bitmapData.Stride);
+
+                bitmapSource.Freeze();
+                return bitmapSource;
+            }
+            finally
+            {
+                bitmap.UnlockBits(bitmapData);
             }
         }
 
@@ -313,20 +439,31 @@ namespace LiveMonitorPreview
                             ICONINFO iconInfo;
                             if (GetIconInfo(cursorInfo.hCursor, out iconInfo))
                             {
-                                // Calculate position relative to the bitmap
-                                int x = cursorInfo.ptScreenPos.x - bounds.X - iconInfo.xHotspot;
-                                int y = cursorInfo.ptScreenPos.y - bounds.Y - iconInfo.yHotspot;
+                                try
+                                {
+                                    // Calculate position relative to the bitmap
+                                    int x = cursorInfo.ptScreenPos.x - bounds.X - iconInfo.xHotspot;
+                                    int y = cursorInfo.ptScreenPos.y - bounds.Y - iconInfo.yHotspot;
 
-                                // Draw the cursor
-                                IntPtr hdc = g.GetHdc();
-                                DrawIcon(hdc, x, y, cursorInfo.hCursor);
-                                g.ReleaseHdc(hdc);
-
-                                // Clean up
-                                if (iconInfo.hbmColor != IntPtr.Zero)
-                                    DeleteObject(iconInfo.hbmColor);
-                                if (iconInfo.hbmMask != IntPtr.Zero)
-                                    DeleteObject(iconInfo.hbmMask);
+                                    // Draw the cursor
+                                    IntPtr hdc = g.GetHdc();
+                                    try
+                                    {
+                                        DrawIcon(hdc, x, y, cursorInfo.hCursor);
+                                    }
+                                    finally
+                                    {
+                                        g.ReleaseHdc(hdc);
+                                    }
+                                }
+                                finally
+                                {
+                                    // Clean up
+                                    if (iconInfo.hbmColor != IntPtr.Zero)
+                                        DeleteObject(iconInfo.hbmColor);
+                                    if (iconInfo.hbmMask != IntPtr.Zero)
+                                        DeleteObject(iconInfo.hbmMask);
+                                }
                             }
                         }
                     }
@@ -340,25 +477,27 @@ namespace LiveMonitorPreview
 
         private void MonitorBorder_MouseDown(object sender, MouseButtonEventArgs e)
         {
-            if (e.ChangedButton == MouseButton.Left)
+            if (e.ChangedButton == MouseButton.Left && sender is Border border && border.DataContext is MonitorViewModel model)
             {
-                var border = sender as Border;
-                _draggedMonitor = border.DataContext as MonitorViewModel;
+                _draggedMonitor = model;
                 DragDrop.DoDragDrop(border, _draggedMonitor, System.Windows.DragDropEffects.Move);
             }
         }
 
         private void MonitorBorder_Drop(object sender, System.Windows.DragEventArgs e)
         {
-            var targetBorder = sender as Border;
-            var targetMonitor = targetBorder.DataContext as MonitorViewModel;
-
-            if (_draggedMonitor != null && targetMonitor != null && _draggedMonitor != targetMonitor)
+            if (sender is Border targetBorder && targetBorder.DataContext is MonitorViewModel targetMonitor)
             {
-                int draggedIndex = _monitors.IndexOf(_draggedMonitor);
-                int targetIndex = _monitors.IndexOf(targetMonitor);
+                if (_draggedMonitor != null && _draggedMonitor != targetMonitor)
+                {
+                    int draggedIndex = _monitors.IndexOf(_draggedMonitor);
+                    int targetIndex = _monitors.IndexOf(targetMonitor);
 
-                _monitors.Move(draggedIndex, targetIndex);
+                    if (draggedIndex >= 0 && targetIndex >= 0)
+                    {
+                        _monitors.Move(draggedIndex, targetIndex);
+                    }
+                }
             }
         }
 
@@ -412,10 +551,7 @@ namespace LiveMonitorPreview
             };
             realtimeOption.Click += (s, args) =>
             {
-                _refreshInterval = 33;
-                _refreshTimer.Stop();
-                _refreshTimer.Interval = TimeSpan.FromMilliseconds(_refreshInterval);
-                _refreshTimer.Start();
+                SetRefreshInterval(33);
 
                 foreach (MenuItem item in refreshTimeItem.Items)
                 {
@@ -434,10 +570,7 @@ namespace LiveMonitorPreview
             };
             halfSecOption.Click += (s, args) =>
             {
-                _refreshInterval = 500;
-                _refreshTimer.Stop();
-                _refreshTimer.Interval = TimeSpan.FromMilliseconds(_refreshInterval);
-                _refreshTimer.Start();
+                SetRefreshInterval(500);
 
                 foreach (MenuItem item in refreshTimeItem.Items)
                 {
@@ -450,19 +583,16 @@ namespace LiveMonitorPreview
             // Add 1-5 seconds options
             foreach (int seconds in new[] { 1, 2, 3, 4, 5 })
             {
+                int interval = seconds * 1000;
                 var refreshOption = new MenuItem
                 {
                     Header = $"{seconds} sec",
                     IsCheckable = true,
-                    IsChecked = _refreshInterval == seconds * 1000
+                    IsChecked = _refreshInterval == interval
                 };
-                int interval = seconds * 1000;
                 refreshOption.Click += (s, args) =>
                 {
-                    _refreshInterval = interval;
-                    _refreshTimer.Stop();
-                    _refreshTimer.Interval = TimeSpan.FromMilliseconds(_refreshInterval);
-                    _refreshTimer.Start();
+                    SetRefreshInterval(interval);
 
                     foreach (MenuItem item in refreshTimeItem.Items)
                     {
@@ -504,8 +634,10 @@ namespace LiveMonitorPreview
                 };
                 monitorItem.Click += (s, args) =>
                 {
-                    var mon = (s as MenuItem).Tag as MonitorViewModel;
-                    mon.IsRefreshDisabled = (s as MenuItem).IsChecked;
+                    if (s is MenuItem item && item.Tag is MonitorViewModel mon)
+                    {
+                        mon.IsRefreshDisabled = item.IsChecked;
+                    }
                 };
                 disableRefreshItem.Items.Add(monitorItem);
             }
@@ -547,7 +679,6 @@ namespace LiveMonitorPreview
                     MessageBoxButton.YesNo, MessageBoxImage.Question);
                 if (result == MessageBoxResult.Yes)
                 {
-                    // Qualify Application to avoid ambiguity with System.Windows.Forms.Application
                     System.Windows.Application.Current.Shutdown();
                 }
             };
@@ -559,15 +690,15 @@ namespace LiveMonitorPreview
 
     public class MonitorViewModel : INotifyPropertyChanged
     {
-        private BitmapImage _preview;
+        private ImageSource? _preview;
         private bool _showName = true;
         private double _cardWidth = 180;
         private double _cardHeight = 160;
-        private string _displayName;
+        private string _displayName = string.Empty;
         private bool _isRefreshDisabled = false;
 
         public int MonitorIndex { get; set; }
-        public string MonitorName { get; set; }
+        public string MonitorName { get; set; } = string.Empty;
 
         private Rectangle _bounds;
         public Rectangle Bounds
@@ -624,21 +755,13 @@ namespace LiveMonitorPreview
             }
         }
 
-        public BitmapImage Preview
+        public ImageSource? Preview
         {
             get => _preview;
             set
             {
-                // Option 2: Clear reference to old image to help GC
-                var oldPreview = _preview;
                 _preview = value;
                 OnPropertyChanged(nameof(Preview));
-
-                // Allow old image to be garbage collected
-                if (oldPreview != null)
-                {
-                    oldPreview = null;
-                }
             }
         }
 
@@ -672,7 +795,7 @@ namespace LiveMonitorPreview
             DisplayName = $"M{MonitorIndex} - {resolution}{primaryTag}";
         }
 
-        public event PropertyChangedEventHandler PropertyChanged;
+        public event PropertyChangedEventHandler? PropertyChanged;
         protected void OnPropertyChanged(string propertyName)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
