@@ -2,6 +2,12 @@
 
 LiveMonitorPreview is a small desktop utility that shows a live preview of your desktop screen in a floating window.
 
+## Screenshots
+
+![Main Window](assets/screenshots.png)
+
+![Settings](assets/settings.png)
+
 ## Why
 
 It helps you monitor an external screen that you cannot physically see, such as:
