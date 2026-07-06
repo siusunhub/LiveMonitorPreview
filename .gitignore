@@ -1,0 +1,16 @@
+## Build outputs
+[Bb]in/
+[Oo]bj/
+[Pp]ublish/
+
+## Visual Studio cache and settings
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## OS metadata
+Thumbs.db
+ehthumbs.db
+Desktop.ini
