@@ -1,5 +1,10 @@
 # LiveMonitorPreview
 
+[![Platform](https://img.shields.io/badge/Platform-Windows%20x64-blue.svg)](https://microsoft.com/windows)
+[![Target Framework](https://img.shields.io/badge/.NET-10.0%20WPF-purple.svg)](https://dotnet.microsoft.com/)
+[![Version](https://img.shields.io/badge/Version-2.0-green.svg)](https://github.com/siusunhub/LiveMonitorPreview)
+[![License](https://img.shields.io/badge/License-MIT-orange.svg)](LICENSE)
+
 LiveMonitorPreview is a small desktop utility that shows a live preview of your desktop screen in a floating window.
 
 ## Screenshots
